@@ -1,0 +1,71 @@
+{
+  "metrics": {
+    "logreg": {
+      "model": "Logistic Regression (baseline)",
+      "accuracy": 0.8969,
+      "precision": 0.6111,
+      "recall": 0.2431,
+      "f1": 0.3478,
+      "roc_auc": 0.895
+    },
+    "rf": {
+      "model": "Random Forest",
+      "accuracy": 0.8844,
+      "precision": 0.4931,
+      "recall": 0.7901,
+      "f1": 0.6072,
+      "roc_auc": 0.9281
+    },
+    "gb": {
+      "model": "Gradient Boosting",
+      "accuracy": 0.9044,
+      "precision": 0.5864,
+      "recall": 0.5249,
+      "f1": 0.5539,
+      "roc_auc": 0.9248
+    }
+  },
+  "confusion_matrices": {
+    "logreg": [
+      [
+        1391,
+        28
+      ],
+      [
+        137,
+        44
+      ]
+    ],
+    "rf": [
+      [
+        1272,
+        147
+      ],
+      [
+        38,
+        143
+      ]
+    ],
+    "gb": [
+      [
+        1352,
+        67
+      ],
+      [
+        86,
+        95
+      ]
+    ]
+  },
+  "feature_importance": {
+    "prior_inspection_fail_count": 0.43986614948110914,
+    "storage_duration_hrs": 0.12738761619777084,
+    "days_since_harvest": 0.11709829386949203,
+    "storage_temp_c": 0.09776666215696497,
+    "transit_temp_c": 0.07045435685100078,
+    "humidity_pct": 0.06571540924766674,
+    "transit_time_hrs": 0.05232607634082226,
+    "crop_type_enc": 0.015994986996477775,
+    "stage_enc": 0.013390448858695541
+  }
+}
