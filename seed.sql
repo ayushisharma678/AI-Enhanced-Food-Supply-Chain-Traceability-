@@ -71,7 +71,7 @@ VALUES
 -- The batch has completed transportation and has reached the
 -- retail store, so its lifecycle status is set to 'Retail' --
 -- matching the Batch.status values allowed by the schema
--- (Harvested, Processing, Stored, In_Transit, Retail, Recalled, Sold).
+-- (Harvested, Processing, Stored, In_Transit, Delivered, Retail, Sold, Recalled).
 
 INSERT OR REPLACE INTO Batch
     (batch_id, farmer_id, crop_type, harvest_date, quantity_kg, status)

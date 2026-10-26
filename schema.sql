@@ -79,6 +79,7 @@ CREATE TABLE Batch (
                             'Stored',
                             'In_Transit',
                             'Delivered',
+                            'Retail',
                             'Sold',
                             'Recalled'
                         )
@@ -229,8 +230,25 @@ CREATE TABLE Risk_Score (
 
 
 -- ============================================================
+-- INDEXES (speed up batch_id lookups used by traceability queries)
+-- ============================================================
+
+CREATE INDEX idx_batch_farmer      ON Batch(farmer_id);
+CREATE INDEX idx_collection_batch  ON Collection_Record(batch_id);
+CREATE INDEX idx_processing_batch  ON Processing_Record(batch_id);
+CREATE INDEX idx_storage_batch     ON Storage_Record(batch_id);
+CREATE INDEX idx_transport_batch   ON Transport_Log(batch_id);
+CREATE INDEX idx_retail_batch      ON Retail_Inventory(batch_id);
+CREATE INDEX idx_inspection_batch  ON Inspection(batch_id);
+CREATE INDEX idx_risk_batch        ON Risk_Score(batch_id);
+
+
+-- ============================================================
 -- 10. TRACEABILITY QUERY
---     Retrieves complete farm-to-retail journey
+--     Retrieves complete farm-to-retail journey.
+--     NOTE: if a batch has several storage/transport/risk rows, this single
+--     join returns one row per combination. The dashboard (app.py) therefore
+--     queries each stage separately and shows the latest risk score.
 -- ============================================================
 
 -- SELECT
