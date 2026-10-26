@@ -192,7 +192,7 @@ def _parse_datetime(value):
 
 
 def get_batch_prediction_inputs(batch_id):
-    """Build model inputs from recorded batch data; explicitly flag any fallback values."""
+    """Build all nine model inputs, preferring recorded data over clearly marked demo inputs."""
     batch_df = read_sql(
         "SELECT batch_id, crop_type, harvest_date, status FROM Batch WHERE batch_id = ?",
         (batch_id,),
@@ -202,12 +202,11 @@ def get_batch_prediction_inputs(batch_id):
     batch = batch_df.iloc[0]
     notes = []
 
-    # Crop type must match a category seen during model training.
     crop_raw = str(batch.get("crop_type") or "").strip()
     crop_lookup = {value.lower(): value for value in MODEL_CROP_TYPES}
     crop_type = crop_lookup.get(crop_raw.lower())
     if crop_type is None:
-        notes.append(f"Crop '{crop_raw or 'unknown'}' is not a category supported by the trained model. Choose a supported crop in New conditions mode.")
+        notes.append(f"Crop '{crop_raw or 'unknown'}' is not supported by the trained model.")
 
     storage = read_sql(
         "SELECT in_date, out_date, temperature_c, humidity_pct FROM Storage_Record WHERE batch_id = ? ORDER BY in_date DESC LIMIT 1",
@@ -221,104 +220,88 @@ def get_batch_prediction_inputs(batch_id):
         "SELECT result, contamination_type FROM Inspection WHERE batch_id = ?",
         (batch_id,),
     )
-    collection = read_sql(
-        "SELECT received_date FROM Collection_Record WHERE batch_id = ? ORDER BY received_date DESC LIMIT 1",
-        (batch_id,),
-    )
-    processing = read_sql(
-        "SELECT process_date FROM Processing_Record WHERE batch_id = ? ORDER BY process_date DESC LIMIT 1",
-        (batch_id,),
-    )
-    retail = read_sql(
-        "SELECT received_date FROM Retail_Inventory WHERE batch_id = ? ORDER BY received_date DESC LIMIT 1",
-        (batch_id,),
-    )
+    collection = read_sql("SELECT received_date FROM Collection_Record WHERE batch_id = ? ORDER BY received_date DESC LIMIT 1", (batch_id,))
+    processing = read_sql("SELECT process_date FROM Processing_Record WHERE batch_id = ? ORDER BY process_date DESC LIMIT 1", (batch_id,))
+    retail = read_sql("SELECT received_date FROM Retail_Inventory WHERE batch_id = ? ORDER BY received_date DESC LIMIT 1", (batch_id,))
+    demo_df = read_sql("SELECT * FROM AI_Demo_Input WHERE batch_id = ?", (batch_id,))
+    demo = demo_df.iloc[0].to_dict() if not demo_df.empty else {}
 
-    status = str(batch.get("status") or "").strip().lower()
+    def demo_value(field, label):
+        value = demo.get(field)
+        if value is None or pd.isna(value):
+            notes.append(f"Missing demo input '{field}'. Run complete_batch_data.py, then restart the app.")
+            return None
+        return float(value)
+
+    status = str(batch.get("status") or "").strip().lower().replace("_", " ")
     status_map = {
-        "collection": "Collection", "collected": "Collection",
+        "collection": "Collection", "collected": "Collection", "harvested": "Collection",
         "processing": "Processing", "processed": "Processing",
         "storage": "Storage", "stored": "Storage",
         "transport": "Transport", "in transit": "Transport", "transit": "Transport",
-        "retail": "Retail", "sold": "Retail",
+        "retail": "Retail", "sold": "Retail", "delivered": "Retail",
     }
     stage = status_map.get(status)
     if stage is None:
-        # Infer the latest documented stage if Batch.status doesn't match training labels.
-        if not retail.empty:
-            stage = "Retail"
-        elif not transport.empty:
-            stage = "Transport"
-        elif not storage.empty:
-            stage = "Storage"
-        elif not processing.empty:
-            stage = "Processing"
-        elif not collection.empty:
-            stage = "Collection"
-        else:
-            stage = "Collection"
-        notes.append(f"Batch status '{batch.get('status') or 'missing'}' did not match a model stage; inferred '{stage}' from available records.")
+        if not retail.empty: stage = "Retail"
+        elif not transport.empty: stage = "Transport"
+        elif not storage.empty: stage = "Storage"
+        elif not processing.empty: stage = "Processing"
+        elif not collection.empty: stage = "Collection"
+        else: stage = "Collection"
+        notes.append(f"Batch status '{batch.get('status') or 'missing'}' did not match a model stage; inferred '{stage}' from recorded journey data.")
 
-    storage_temp = 5.9
-    humidity = 75.0
-    storage_duration = 24.0
-    if not storage.empty:
-        row = storage.iloc[0]
-        if pd.notna(row.get("temperature_c")):
-            storage_temp = float(row["temperature_c"])
-        else:
-            notes.append("Storage temperature is missing; used demonstration fallback 5.9°C.")
-        if pd.notna(row.get("humidity_pct")):
-            humidity = float(row["humidity_pct"])
-        else:
-            notes.append("Humidity is missing; used demonstration fallback 75%.")
-        start = _parse_datetime(row.get("in_date"))
-        end = _parse_datetime(row.get("out_date"))
-        if start is not None and end is not None and end >= start:
-            storage_duration = max(0.0, (end - start).total_seconds() / 3600)
-        else:
-            notes.append("Storage duration could not be calculated from in/out dates; used demonstration fallback 24 hours.")
+    # Actual recorded values win. Demo table is used only when an input is absent/uncomputable.
+    storage_row = storage.iloc[0] if not storage.empty else {}
+    if not storage.empty and pd.notna(storage_row.get("temperature_c")):
+        storage_temp = float(storage_row["temperature_c"])
     else:
-        notes.append("No storage record found; used demonstration fallbacks for storage temperature, humidity and duration.")
-
-    transit_time = 4.0
-    transit_temp = 8.0
-    if not transport.empty:
-        row = transport.iloc[0]
-        if pd.notna(row.get("transit_temp_c")):
-            transit_temp = float(row["transit_temp_c"])
-        else:
-            notes.append("Transit temperature is missing; used demonstration fallback 8°C.")
-        start = _parse_datetime(row.get("dispatch_time"))
-        end = _parse_datetime(row.get("arrival_time"))
-        if start is not None and end is not None and end >= start:
-            transit_time = max(0.0, (end - start).total_seconds() / 3600)
-        else:
-            notes.append("Transit duration could not be calculated from dispatch/arrival times; used demonstration fallback 4 hours.")
+        storage_temp = demo_value("storage_temp_c", "Storage temperature")
+    if not storage.empty and pd.notna(storage_row.get("humidity_pct")):
+        humidity = float(storage_row["humidity_pct"])
     else:
-        notes.append("No transport record found; used demonstration fallbacks for transit time and temperature.")
+        humidity = demo_value("humidity_pct", "Humidity")
+    s_start = _parse_datetime(storage_row.get("in_date")) if not storage.empty else None
+    s_end = _parse_datetime(storage_row.get("out_date")) if not storage.empty else None
+    if s_start is not None and s_end is not None and s_end >= s_start:
+        storage_duration = max(0.0, (s_end - s_start).total_seconds() / 3600)
+    else:
+        storage_duration = demo_value("storage_duration_hrs", "Storage duration")
 
-    prior_failures = 0
+    transport_row = transport.iloc[0] if not transport.empty else {}
+    if not transport.empty and pd.notna(transport_row.get("transit_temp_c")):
+        transit_temp = float(transport_row["transit_temp_c"])
+    else:
+        transit_temp = demo_value("transit_temp_c", "Transit temperature")
+    t_start = _parse_datetime(transport_row.get("dispatch_time")) if not transport.empty else None
+    t_end = _parse_datetime(transport_row.get("arrival_time")) if not transport.empty else None
+    if t_start is not None and t_end is not None and t_end >= t_start:
+        transit_time = max(0.0, (t_end - t_start).total_seconds() / 3600)
+    else:
+        transit_time = demo_value("transit_time_hrs", "Transit time")
+
     if not inspections.empty:
         results = inspections["result"].fillna("").astype(str).str.strip().str.lower()
-        prior_failures = int(results.isin(["fail", "failed", "reject", "rejected"] ).sum())
+        prior_failures = int(results.isin(["fail", "failed", "reject", "rejected"]).sum())
+    else:
+        prior_failures = int(demo_value("prior_inspection_fail_count", "Previous inspection failures"))
 
-    # Use the latest recorded supply-chain event as the reference point for age.
     harvest = _parse_datetime(batch.get("harvest_date"))
     event_values = []
-    for frame, column in [(collection, "received_date"), (processing, "process_date"),
-                          (storage, "out_date"), (transport, "arrival_time"),
-                          (retail, "received_date")]:
+    for frame, column in [(collection, "received_date"), (processing, "process_date"), (storage, "out_date"), (transport, "arrival_time"), (retail, "received_date")]:
         if not frame.empty:
             dt = _parse_datetime(frame.iloc[0].get(column))
-            if dt is not None:
-                event_values.append(dt)
+            if dt is not None: event_values.append(dt)
     reference = max(event_values) if event_values else harvest
-    days_since_harvest = 1.0
     if harvest is not None and reference is not None and reference >= harvest:
         days_since_harvest = max(0.0, (reference - harvest).total_seconds() / 86400)
     else:
-        notes.append("Days since harvest could not be calculated; used demonstration fallback 1 day.")
+        days_since_harvest = demo_value("days_since_harvest", "Days since harvest")
+
+    fields = [crop_type, stage, storage_temp, storage_duration, transit_time, transit_temp, humidity, prior_failures, days_since_harvest]
+    if any(v is None for v in fields):
+        notes.append("Prediction blocked because one or more required inputs are missing. Run complete_batch_data.py and verify the demo-input table.")
+        return None, notes
 
     values = {
         "crop_type": crop_type,
@@ -462,7 +445,7 @@ elif page == "QR Code Generator":
         st.warning("No batches are available to generate a QR code.")
     else:
         selected = st.selectbox("Choose batch", batches["batch_id"].tolist())
-        base_url = os.getenv("TRACEABILITY_BASE_URL", "http://172.17.107.195:8503/").rstrip("/")
+        base_url = os.getenv("TRACEABILITY_BASE_URL", "http://10.57.22.107:8501/").rstrip("/")
         trace_url = f"{base_url}/?batch_id={selected}"
         st.code(trace_url, language="text")
         st.image(make_qr(trace_url), caption=f"QR code for {selected}", width=240)
@@ -478,8 +461,9 @@ elif page == "AI Risk Prediction":
     st.title("AI Contamination-Risk Prediction")
     st.caption("Use recorded conditions from an existing batch or enter conditions for a new scenario.")
     st.warning(
-        "This model was trained on synthetic data. Its output is for project demonstration, "
-        "not a certified food-safety assessment. A low score does not prove food is safe."
+        "Demo Mode: Some input values may be synthetic and have not been measured or independently verified. "
+        "This model was trained on synthetic data; predictions are for demonstration only, not a certified "
+        "food-safety assessment. A low score does not prove food is safe."
     )
 
     try:
@@ -520,21 +504,19 @@ elif page == "AI Risk Prediction":
                 prediction_notes = notes
                 if values and values.get("crop_type") is not None:
                     st.markdown("#### Conditions assembled from the database")
-                    st.caption("Values are derived from stored records where possible. Any fallback values are listed below.")
+                    st.caption("Recorded values are preferred. If a required value is unavailable, the app uses a synthetic demo input from AI_Demo_Input.")
                     source_df = pd.DataFrame([
                         {"Model input": "Crop type", "Value": values["crop_type"], "Source": "Batch.crop_type"},
                         {"Model input": "Supply-chain stage", "Value": values["supply_chain_stage"], "Source": "Batch.status / recorded journey"},
-                        {"Model input": "Storage temperature (°C)", "Value": values["storage_temp_c"], "Source": "Latest Storage_Record"},
-                        {"Model input": "Storage duration (hours)", "Value": round(values["storage_duration_hrs"], 2), "Source": "Storage_Record in/out dates"},
-                        {"Model input": "Transit time (hours)", "Value": round(values["transit_time_hrs"], 2), "Source": "Transport_Log dispatch/arrival times"},
-                        {"Model input": "Transit temperature (°C)", "Value": values["transit_temp_c"], "Source": "Latest Transport_Log"},
-                        {"Model input": "Humidity (%)", "Value": values["humidity_pct"], "Source": "Latest Storage_Record"},
-                        {"Model input": "Previous inspection failures", "Value": values["prior_inspection_fail_count"], "Source": "Inspection results marked Fail/Reject"},
-                        {"Model input": "Days since harvest", "Value": round(values["days_since_harvest"], 2), "Source": "Harvest date to latest recorded event"},
+                        {"Model input": "Storage temperature (°C)", "Value": values["storage_temp_c"], "Source": "Storage_Record, or AI_Demo_Input fallback"},
+                        {"Model input": "Storage duration (hours)", "Value": round(values["storage_duration_hrs"], 2), "Source": "Storage_Record dates, or AI_Demo_Input fallback"},
+                        {"Model input": "Transit time (hours)", "Value": round(values["transit_time_hrs"], 2), "Source": "Transport_Log times, or AI_Demo_Input fallback"},
+                        {"Model input": "Transit temperature (°C)", "Value": values["transit_temp_c"], "Source": "Transport_Log, or AI_Demo_Input fallback"},
+                        {"Model input": "Humidity (%)", "Value": values["humidity_pct"], "Source": "Storage_Record, or AI_Demo_Input fallback"},
+                        {"Model input": "Previous inspection failures", "Value": values["prior_inspection_fail_count"], "Source": "Inspection records, or AI_Demo_Input fallback"},
+                        {"Model input": "Days since harvest", "Value": round(values["days_since_harvest"], 2), "Source": "Recorded dates, or AI_Demo_Input fallback"},
                     ])
                     st.dataframe(source_df, use_container_width=True, hide_index=True)
-                    for note in prediction_notes:
-                        st.warning(note)
                     if st.button("Predict and save risk for selected batch", type="primary", key="predict_existing_batch"):
                         prediction_values = values
                         prediction_label = f"Existing batch: {selected_batch}"
@@ -542,6 +524,8 @@ elif page == "AI Risk Prediction":
                         submitted = True
                 elif values:
                     st.error("The batch crop type is not supported by this trained model. Use New conditions mode and select a supported crop category.")
+                else:
+                    st.error("This batch is missing one or more required prediction inputs. Run complete_batch_data.py in the project folder, then restart Streamlit.")
                     for note in prediction_notes:
                         st.warning(note)
 
